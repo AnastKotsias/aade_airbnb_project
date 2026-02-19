@@ -1,2 +1,5 @@
-node_modules
+bookings.db
+audit_logs/
+node_modules/
+*.log
 .env
