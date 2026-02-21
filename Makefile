@@ -1,13 +1,16 @@
-.PHONY: setup seed run clean
+.PHONY: setup seed run-ingest run-agent clean
 
 setup:
 	npm install
 
 seed:
-	npm tsx src/ingest_mocks.ts
+	npx tsx src/ingest_mocks.ts
 
-run:
-	npm tsx src/agent_aade.ts
+run-ingest:
+	npx tsx src/ingest_airbnb.ts
+
+run-agent:
+	npx tsx src/agent_aade.ts
 
 clean:
 	rm -f bookings.db
@@ -15,7 +18,8 @@ clean:
 
 help:
 	@echo "Available targets:"
-	@echo "  setup  - Install dependencies"
-	@echo "  seed   - Ingest mock data into the database"
-	@echo "  run    - Start the agent to process bookings"
-	@echo "  clean  - Remove database and logs"
+	@echo "  setup      - Install dependencies"
+	@echo "  seed       - Ingest mock data into the database"
+	@echo "  run-ingest - Run Airbnb ingestion (requires .env)"
+	@echo "  run-agent  - Run AADE submission agent (requires .env)"
+	@echo "  clean      - Remove database and logs"

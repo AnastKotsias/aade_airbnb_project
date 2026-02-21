@@ -11,16 +11,27 @@ db.exec(`
     check_in TEXT,
     check_out TEXT,
     total_payout REAL,
-    platform_id TEXT UNIQUE, -- Prevents double submission
-    status TEXT DEFAULT 'PENDING', -- PENDING, DONE, ERROR
+    platform_id TEXT UNIQUE,
+    status TEXT DEFAULT 'PENDING',
     audit_screenshot_path TEXT,
+    is_cancelled INTEGER DEFAULT 0,
+    cancellation_date TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )
 `);
 
+try {
+  db.exec(`ALTER TABLE bookings ADD COLUMN is_cancelled INTEGER DEFAULT 0`);
+} catch {}
+
+try {
+  db.exec(`ALTER TABLE bookings ADD COLUMN cancellation_date TEXT`);
+} catch {}
+
 export const insertBooking: Statement = db.prepare(`
-  INSERT OR IGNORE INTO bookings (guest_name, check_in, check_out, total_payout, platform_id)
-  VALUES (@guestName, @checkIn, @checkOut, @totalPayout, @platformId)
+  INSERT OR IGNORE INTO bookings 
+  (guest_name, check_in, check_out, total_payout, platform_id, is_cancelled, cancellation_date)
+  VALUES (@guestName, @checkIn, @checkOut, @totalPayout, @platformId, @isCancelled, @cancellationDate)
 `);
 
 export const getPendingBookings: Statement = db.prepare(`
