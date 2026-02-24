@@ -1,7 +1,10 @@
-.PHONY: setup seed run-ingest run-agent clean
+.PHONY: setup seed run-ingest run-agent clean install-browser
 
 setup:
 	npm install
+
+install-browser:
+	npx playwright install chromium
 
 seed:
 	npx tsx src/ingest_mocks.ts

@@ -5,25 +5,32 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
+// Configuration
 const ENV_MODE = (process.env.STAGEHAND_ENV || 'LOCAL') as 'LOCAL' | 'BROWSERBASE';
 
+// Zod schema for Airbnb data validation
 const AirbnbSchema = z.object({
   bookings: z.array(z.object({
-    guestName: z.string().describe("The full name of the guest"),
-    checkIn: z.string().describe("Check-in date in YYYY-MM-DD format"),
-    checkOut: z.string().describe("Check-out date in YYYY-MM-DD format"),
-    totalPayout: z.number().describe("The total payout amount in Euros"),
-    confirmationCode: z.string().describe("The alphanumeric reservation code (e.g., HM123456)"),
+    guestName: z.string().min(1).describe("The full name of the guest"),
+    checkIn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe("Check-in date in YYYY-MM-DD format"),
+    checkOut: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe("Check-out date in YYYY-MM-DD format"),
+    totalPayout: z.number().positive("Payout must be positive - cannot send NaN to tax office"),
+    confirmationCode: z.string().min(1).describe("The alphanumeric reservation code (e.g., HM123456)"),
     isCancelled: z.boolean().optional().describe("Whether the reservation was cancelled"),
-    cancellationDate: z.string().optional().describe("Cancellation date in YYYY-MM-DD format if cancelled")
+    cancellationDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe("Cancellation date in YYYY-MM-DD format if cancelled")
   }))
 });
 
 async function main() {
-  console.log("🚀 Starting Airbnb Ingestion Agent...");
+  console.log("🚀 Starting Airbnb Ingestion Agent...\n");
 
+  // Initialize browser automation
   const stagehand = new Stagehand({
     env: ENV_MODE,
+    verbose: 2,
+    localBrowserLaunchOptions: {
+      headless: false, // Visible browser for debugging
+    },
     ...(ENV_MODE === 'BROWSERBASE' && {
       apiKey: process.env.BROWSERBASE_API_KEY!,
       projectId: process.env.BROWSERBASE_PROJECT_ID!,
@@ -39,6 +46,8 @@ async function main() {
   }
 
   try {
+    // Login to Airbnb
+    console.log("🔐 Logging into Airbnb...");
     await page.goto("https://www.airbnb.com/login");
     
     await stagehand.act(`Fill email with ${process.env.AIRBNB_EMAIL}`);
@@ -46,18 +55,22 @@ async function main() {
     await stagehand.act(`Fill password with ${process.env.AIRBNB_PASSWORD}`);
     await stagehand.act("Click login");
 
-    console.log("⏳ Waiting for dashboard (Check Live View if 2FA is needed)...");
+    console.log("⏳ Waiting for dashboard (manual 2FA if needed)...");
     await new Promise(r => setTimeout(r, 15000));
 
+    // Navigate to completed bookings
+    console.log("📊 Fetching completed reservations...");
     await page.goto("https://www.airbnb.com/hosting/reservations/completed");
 
+    // Extract booking data using AI
     const data = await stagehand.extract(
       "Extract all completed bookings from the list, including cancelled reservations. For cancelled bookings, set isCancelled to true and include the cancellationDate.",
       AirbnbSchema
     );
 
-    console.log(`🔍 Found ${data.bookings.length} bookings.`);
+    console.log(`\n🔍 Found ${data.bookings.length} booking(s)\n`);
 
+    // Insert bookings into database
     for (const booking of data.bookings) {
       try {
         insertBooking.run({
@@ -79,9 +92,13 @@ async function main() {
       }
     }
 
-  } catch (error) {
-    console.error("❌ Ingestion failed:", error);
+    console.log("\n✅ Ingestion complete");
+
+  } catch (error: unknown) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    console.error("\n❌ Ingestion failed:", errorMsg);
   } finally {
+    console.log("\n🔒 Closing browser...");
     await stagehand.close();
   }
 }
