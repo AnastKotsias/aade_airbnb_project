@@ -1,12 +1,10 @@
 import { Stagehand } from '@browserbasehq/stagehand';
 import { z } from 'zod';
 import { insertBooking } from './db.js';
-import dotenv from 'dotenv';
+import { validateEnv, MODEL_CONFIG, ENV_MODE } from './config.js';
 
-dotenv.config();
-
-// Configuration
-const ENV_MODE = (process.env.STAGEHAND_ENV || 'LOCAL') as 'LOCAL' | 'BROWSERBASE';
+// Validate required environment variables
+validateEnv(['AIRBNB_EMAIL', 'AIRBNB_PASSWORD']);
 
 // Zod schema for Airbnb data validation
 const AirbnbSchema = z.object({
@@ -24,10 +22,11 @@ const AirbnbSchema = z.object({
 async function main() {
   console.log("🚀 Starting Airbnb Ingestion Agent...\n");
 
-  // Initialize browser automation
+  // Initialize browser automation with selected model
   const stagehand = new Stagehand({
     env: ENV_MODE,
     verbose: 2,
+    model: MODEL_CONFIG,
     localBrowserLaunchOptions: {
       headless: false, // Visible browser for debugging
     },

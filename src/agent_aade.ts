@@ -1,14 +1,10 @@
 import { Stagehand } from '@browserbasehq/stagehand';
 import { getPendingBookings, updateStatus } from './db.js';
-import dotenv from 'dotenv';
+import { validateEnv, MODEL_CONFIG, ENV_MODE, DRY_RUN, SLOW_MO_MS } from './config.js';
 import fs from 'fs';
 
-dotenv.config();
-
-// Configuration
-const DRY_RUN = process.env.DRY_RUN !== 'false';
-const ENV_MODE = (process.env.STAGEHAND_ENV || 'LOCAL') as 'LOCAL' | 'BROWSERBASE';
-const SLOW_MO_MS = 100; // Rate limiting: mimic human typing speeds
+// Validate required environment variables
+validateEnv(['AADE_USERNAME', 'AADE_PASSWORD']);
 
 // Utilities
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
@@ -36,8 +32,9 @@ async function main() {
   const stagehand = new Stagehand({
     env: ENV_MODE,
     verbose: 2,
+    model: MODEL_CONFIG,
     localBrowserLaunchOptions: {
-      headless: false, // Visible browser for debugging
+      headless: false,
     },
     ...(ENV_MODE === 'BROWSERBASE' && {
       apiKey: process.env.BROWSERBASE_API_KEY!,
@@ -73,9 +70,9 @@ async function main() {
     await stagehand.act(`Fill the password field with ${process.env.AADE_PASSWORD}`);
     await stagehand.act("Click the Login/Connect button");
 
-    console.log(`⚠️  Waiting for login... (manual 2FA/OTP if required)`);
+    console.log(`⏳ Waiting for login to complete...`);
     await page.waitForLoadState('networkidle');
-    await sleep(5000); // Extra time for manual 2FA if needed 
+    await sleep(2000); // Give the page time to fully load
     
     // Process each booking
     for (const booking of bookings) {
