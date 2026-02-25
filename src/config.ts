@@ -9,16 +9,16 @@ export const SLOW_MO_MS = 100; // Rate limiting: mimic human typing speeds
 
 // ===== LLM Model Configuration =====
 export const MODEL_CONFIG = {
-  modelName: 'gemini-1.5-flash' as const,
-  provider: 'google' as const,
-  apiKey: process.env.GOOGLE_GENERATIVE_AI_API_KEY!,
+  modelName: 'gpt-4o-mini' as const,
+  provider: 'openai' as const,
+  apiKey: process.env.OPENAI_API_KEY!,
 };
 
 // ===== Validation =====
 export function validateEnv(requiredVars: string[]): void {
-  if (!process.env.GOOGLE_GENERATIVE_AI_API_KEY) {
-    console.error('\n❌ Missing GOOGLE_GENERATIVE_AI_API_KEY in .env file');
-    console.error('💡 Get one at: https://aistudio.google.com/apikey\n');
+  if (!process.env.OPENAI_API_KEY) {
+    console.error('\n❌ Missing OPENAI_API_KEY in .env file');
+    console.error('💡 Get one at: https://platform.openai.com/api-keys\n');
     process.exit(1);
   }
 
@@ -31,5 +31,5 @@ export function validateEnv(requiredVars: string[]): void {
     process.exit(1);
   }
 
-  console.log('🤖 Using: Google Gemini (gemini-1.5-flash)\n');
+  console.log('🤖 Using: OpenAI (gpt-4o-mini)\n');
 }
