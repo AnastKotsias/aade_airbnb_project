@@ -2,6 +2,7 @@ import { Stagehand } from '@browserbasehq/stagehand';
 import { z } from 'zod';
 import { insertBooking } from './db.js';
 import { MODEL_CONFIG, ENV_MODE } from './config.js';
+import fs from 'fs';
 
 // Validate API key
 if (!process.env.OPENAI_API_KEY) {
@@ -45,6 +46,11 @@ function normalizeDate(dateStr: string): string {
 async function main() {
   console.log("🏠 Starting Mock Airbnb Extraction Agent...\n");
   console.log("📍 Target: http://localhost:3000 (Mock Airbnb Host Dashboard)\n");
+
+  // Ensure audit logs directory exists
+  if (!fs.existsSync('./audit_logs')) {
+    fs.mkdirSync('./audit_logs');
+  }
 
   // Initialize browser automation
   const stagehand = new Stagehand({

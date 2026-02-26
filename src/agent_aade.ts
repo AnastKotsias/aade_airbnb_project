@@ -1,176 +1,242 @@
-import { Stagehand } from '@browserbasehq/stagehand';
+/**
+ * AADE Submission Agent
+ * 
+ * Stage 3 of the Buffer Pattern Architecture:
+ * Reads pending bookings from the database and submits them to AADE.
+ */
+
+import { Stagehand, type Page } from '@browserbasehq/stagehand';
 import { getPendingBookings, updateStatus } from './db.js';
 import { validateEnv, MODEL_CONFIG, ENV_MODE, DRY_RUN, SLOW_MO_MS } from './config.js';
 import fs from 'fs';
 
-// Validate required environment variables (credentials no longer required - user enters manually)
+// Import the modular AADE handlers
+import {
+  type Booking,
+  type AgentConfig,
+  type AADEPageState,
+  DEFAULT_AGENT_CONFIG,
+  detectPageState,
+  isLoggedIn,
+  hasMaintenanceMessage,
+  hasSessionExpired,
+  getStateDescription,
+  handleUserInfoPage,
+  handlePropertyRegistryPage,
+  handleDeclarationsListPage,
+  fillDeclarationForm,
+  submitDeclaration,
+  navigateToPropertyRegistry,
+} from './aade/index.js';
+
+// Validate environment
 validateEnv([]);
+
+// Agent configuration from environment
+const agentConfig: AgentConfig = {
+  ...DEFAULT_AGENT_CONFIG,
+  dryRun: DRY_RUN,
+  slowMoMs: SLOW_MO_MS,
+};
 
 // Utilities
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-interface Booking {
-  id: number;
-  guest_name: string;
-  check_in: string;
-  check_out: string;
-  total_payout: number;
-  platform_id: string;
-  status: string;
-  audit_screenshot_path: string | null;
-  is_cancelled: number;
-  cancellation_date: string | null;
-}
-
 /**
- * Click the "ΣΥΝΕΧΕΙΑ" (Continue) button if it appears after form submission
- * AADE shows this confirmation page after saving contact info
+ * Wait for user to complete manual login
  */
-async function clickContinueButtonIfPresent(page: any): Promise<void> {
-  try {
-    // Look for Continue button in Greek or English
-    const continueButton = page.locator('button:has-text("ΣΥΝΕΧΕΙΑ"), button:has-text("Continue"), a:has-text("ΣΥΝΕΧΕΙΑ"), input[value*="ΣΥΝΕΧΕΙΑ"]').first();
-    const exists = await continueButton.isVisible().catch(() => false);
+async function waitForLogin(page: Page, maxWaitMs: number): Promise<boolean> {
+  console.log("\n" + "═".repeat(60));
+  console.log("👤 MANUAL LOGIN REQUIRED");
+  console.log("═".repeat(60));
+  console.log("Please enter your AADE credentials in the browser and click Login.");
+  console.log("The agent will continue automatically once you're logged in...");
+  console.log("═".repeat(60) + "\n");
+  
+  const pollInterval = 2000;
+  let elapsed = 0;
+  
+  while (elapsed < maxWaitMs) {
+    await sleep(pollInterval);
+    elapsed += pollInterval;
     
-    if (exists) {
-      console.log("📍 Found 'ΣΥΝΕΧΕΙΑ' (Continue) button - clicking...");
-      await continueButton.click();
-      await sleep(1500);
+    if (await isLoggedIn(page)) {
+      console.log("✅ Login detected! Continuing...");
+      return true;
     }
-  } catch {
-    // No continue button, proceed
+    
+    if (elapsed % 10000 === 0) {
+      process.stdout.write(".");
+    }
+  }
+  
+  return false;
+}
+
+/**
+ * Take an audit screenshot and return the path
+ */
+async function takeAuditScreenshot(
+  page: Page,
+  prefix: string,
+  bookingId?: string
+): Promise<string> {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const filename = bookingId 
+    ? `${prefix}_${bookingId}_${timestamp}.png`
+    : `${prefix}_${timestamp}.png`;
+  const screenshotPath = `${agentConfig.auditLogsDir}/${filename}`;
+  
+  await page.screenshot({ path: screenshotPath, fullPage: true });
+  console.log(`📸 Screenshot saved: ${screenshotPath}`);
+  
+  return screenshotPath;
+}
+
+/**
+ * Handle the current page state and transition to the next
+ */
+async function handleCurrentState(
+  stagehand: Stagehand,
+  page: Page,
+  state: AADEPageState
+): Promise<{ success: boolean; nextState?: AADEPageState; error?: string }> {
+  console.log(`\n📍 Current state: ${getStateDescription(state)}`);
+  
+  switch (state) {
+    case 'LOGIN': {
+      const loginSuccess = await waitForLogin(page, agentConfig.maxLoginWaitMs);
+      if (!loginSuccess) {
+        return { success: false, error: 'Login timeout' };
+      }
+      await page.waitForLoadState('domcontentloaded');
+      await sleep(2000);
+      const newState = await detectPageState(page);
+      return { success: true, nextState: newState };
+    }
+    
+    case 'USER_INFO':
+      return await handleUserInfoPage(stagehand, page, agentConfig);
+    
+    case 'PROPERTY_REGISTRY':
+      return await handlePropertyRegistryPage(stagehand, page, agentConfig);
+    
+    case 'DECLARATIONS_LIST':
+      return await handleDeclarationsListPage(stagehand, page, agentConfig);
+    
+    case 'UNKNOWN':
+      await navigateToPropertyRegistry(stagehand, page);
+      await sleep(2000);
+      return { success: true, nextState: await detectPageState(page) };
+    
+    default:
+      return { success: true, nextState: state };
   }
 }
 
 /**
- * Check if we're on the User Info page (contact details required by AADE)
- * IMPORTANT: AADE requires contact info to proceed - cannot be skipped!
- * Clicking "Cancel" will log you out. We must fill the form to continue.
- * 
- * For testing (DRY_RUN=true): Uses placeholder values that won't affect real submissions
- * For production: Should use real contact info from environment variables
+ * Process a single booking through AADE
  */
-async function handleUserInfoPageIfPresent(stagehand: Stagehand, page: any): Promise<boolean> {
-  const currentUrl = page.url();
-  
-  // Check if we're on the userInfo page
-  if (!currentUrl.includes('userInfo')) {
-    return false; // Not on user info page
-  }
-  
-  console.log("📋 Detected User Info page - AADE requires contact details to proceed");
-  console.log("⚠️  Note: Clicking 'Cancel' would log you out. Filling required fields...");
-  
-  // Use environment variables or test placeholders
-  const phone = process.env.AADE_PHONE || '2101234567';
-  const mobile = process.env.AADE_MOBILE || '6971234567';  
-  const email = process.env.AADE_EMAIL || 'test@example.com';
+async function processBooking(
+  stagehand: Stagehand,
+  page: Page,
+  booking: Booking
+): Promise<{ status: string; screenshot: string | null }> {
+  const cancelledTag = booking.is_cancelled ? ' (CANCELLED)' : '';
+  console.log(`\n${"─".repeat(60)}`);
+  console.log(`📝 Processing: ${booking.platform_id} - ${booking.guest_name}${cancelledTag}`);
+  console.log(`   📅 ${booking.check_in} → ${booking.check_out}`);
+  console.log(`   💰 €${booking.total_payout.toFixed(2)}`);
   
   try {
-    // Use Playwright directly for more reliable form filling on this old gov site
-    // The textboxes are in a specific order: Telephone, Mobile, Email
-    const telephoneInput = page.locator('input[type="text"]').first();
-    const mobileInput = page.locator('input[type="text"]').nth(1);
-    const emailInput = page.locator('input[type="text"]').nth(2);
+    await navigateToPropertyRegistry(stagehand, page);
     
-    // Clear and fill each field
-    await telephoneInput.click();
-    await telephoneInput.fill(phone);
-    await sleep(200);
+    let currentState = await detectPageState(page);
+    const maxTransitions = 5;
+    let transitions = 0;
     
-    await mobileInput.click();
-    await mobileInput.fill(mobile);
-    await sleep(200);
+    while (currentState !== 'NEW_DECLARATION' && transitions < maxTransitions) {
+      const result = await handleCurrentState(stagehand, page, currentState);
+      
+      if (!result.success) {
+        if (result.error === 'NO_PROPERTIES_REGISTERED') {
+          return { status: 'NEEDS_PROPERTY', screenshot: null };
+        }
+        throw new Error(result.error || 'State transition failed');
+      }
+      
+      currentState = result.nextState || await detectPageState(page);
+      transitions++;
+    }
     
-    await emailInput.click();
-    await emailInput.fill(email);
-    await sleep(200);
+    if (currentState !== 'NEW_DECLARATION') {
+      throw new Error(`Could not reach declaration form (stuck at: ${currentState})`);
+    }
     
-    console.log(`📝 Filled contact info: Phone=${phone}, Mobile=${mobile}, Email=${email}`);
+    const fillResult = await fillDeclarationForm(stagehand, page, booking, agentConfig);
     
-    // Click Save button using Playwright locator (more reliable than LLM)
-    const saveButton = page.locator('button:has-text("Αποθήκευση"), button:has-text("Save")').first();
-    await saveButton.click();
+    if (!fillResult.success) {
+      throw new Error(fillResult.error || 'Form filling failed');
+    }
     
-    await sleep(2000);
+    const screenshotPath = await takeAuditScreenshot(page, 'declaration', booking.platform_id);
     
-    // After saving, AADE might show a "ΣΥΝΕΧΕΙΑ" (Continue) confirmation page
-    await clickContinueButtonIfPresent(page);
+    const submitResult = await submitDeclaration(
+      stagehand, page, booking, agentConfig, screenshotPath
+    );
     
-    console.log("✅ Contact info saved, continuing to declarations...");
+    if (!submitResult.success) {
+      throw new Error(submitResult.error || 'Submission failed');
+    }
     
-    return true;
+    const status = agentConfig.dryRun ? 'DRY_RUN_VERIFIED' : 'SUBMITTED';
+    console.log(`✅ Booking processed: ${status}`);
+    
+    return { status, screenshot: screenshotPath };
+    
   } catch (error) {
-    console.log("⚠️  Could not fill form with Playwright, trying Stagehand...");
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    console.error(`❌ Error processing booking: ${errorMsg}`);
     
-    // Fallback to Stagehand if direct Playwright fails
-    await stagehand.act(`Type ${phone} in the Telephone field`);
-    await sleep(300);
-    await stagehand.act(`Type ${mobile} in the Mobile field`);
-    await sleep(300);
-    await stagehand.act(`Type ${email} in the Email field`);
-    await sleep(300);
-    await stagehand.act("Click the Save button");
-    await sleep(2000);
+    const isMaintenanceError = await hasMaintenanceMessage(page) ||
+      errorMsg.toLowerCase().includes('maintenance') ||
+      errorMsg.toLowerCase().includes('συντήρηση');
     
-    // After saving, AADE might show a "ΣΥΝΕΧΕΙΑ" (Continue) confirmation page
-    await clickContinueButtonIfPresent(page);
+    const status = isMaintenanceError ? 'RETRY_LATER' : 'ERROR';
     
-    return true;
+    if (isMaintenanceError) {
+      console.log("⚠️  System maintenance detected - will retry later");
+    }
+    
+    return { status, screenshot: null };
   }
 }
 
 /**
- * Dismiss any language selection popup that appears on AADE portal
+ * Main agent entry point
  */
-async function dismissLanguagePopupIfPresent(stagehand: Stagehand, page: any): Promise<void> {
-  await sleep(1000); // Wait for popup to appear
-  
-  try {
-    // Check if there's a language selection popup and dismiss it by selecting Greek
-    const greekButton = page.locator('text=Ελληνικά').first();
-    const hasPopup = await greekButton.isVisible().catch(() => false);
-    
-    if (hasPopup) {
-      console.log("🌐 Language popup detected - selecting Greek...");
-      await greekButton.click();
-      await sleep(500);
-    }
-  } catch {
-    // No popup, continue
-  }
-}
-
 async function main() {
-  // Ensure audit logs directory exists
-  if (!fs.existsSync('./audit_logs')) {
-    fs.mkdirSync('./audit_logs');
+  if (!fs.existsSync(agentConfig.auditLogsDir)) {
+    fs.mkdirSync(agentConfig.auditLogsDir, { recursive: true });
   }
-
-  // Initialize browser automation with password manager disabled
+  
   const stagehand = new Stagehand({
     env: ENV_MODE,
     verbose: 2,
     model: MODEL_CONFIG,
     localBrowserLaunchOptions: {
       headless: false,
-      args: [
-        '--disable-save-password-bubble',        // Disable password save prompts
-        '--disable-translate',                    // Disable translation prompts
-      ],
+      args: ['--disable-save-password-bubble', '--disable-translate'],
     },
     browserbaseSessionCreateParams: {
-      // For Browserbase, use these settings
-      browserSettings: {
-        blockAds: true,
-      },
+      browserSettings: { blockAds: true },
     },
     ...(ENV_MODE === 'BROWSERBASE' && {
       apiKey: process.env.BROWSERBASE_API_KEY!,
       projectId: process.env.BROWSERBASE_PROJECT_ID!,
     }),
   });
-
+  
   await stagehand.init();
   
   const page = stagehand.context.pages()[0];
@@ -178,206 +244,98 @@ async function main() {
     throw new Error("Failed to get browser page");
   }
   
-  // Fetch pending bookings from database
   const bookings = getPendingBookings.all() as Booking[];
+  
   if (bookings.length === 0) {
     console.log("✅ No pending bookings to submit.");
     await stagehand.close();
     return;
   }
-
-  console.log(`📋 Found ${bookings.length} pending booking(s) to process\n`);
-
+  
+  console.log(`📋 Found ${bookings.length} pending booking(s) to process`);
+  console.log(`🔧 Mode: ${agentConfig.dryRun ? 'DRY RUN (no actual submission)' : 'PRODUCTION'}`);
+  
   try {
-    // Navigate to AADE portal and login
-    console.log("🌐 Navigating to AADE portal...");
+    console.log("\n🌐 Navigating to AADE portal...");
     await page.goto("https://www1.gsis.gr/taxisnet/short_term_letting/");
-    await sleep(1500);
+    await sleep(2000);
     
-    // Dismiss language popup if it appears
-    await dismissLanguagePopupIfPresent(stagehand, page);
+    let currentState = await detectPageState(page);
+    console.log(`📍 Initial state: ${getStateDescription(currentState)}`);
     
-    console.log("🔐 Opening login page...");
-    await stagehand.act("Click the 'Entry' or 'Είσοδος' button to log in");
-    await sleep(500);
-    
-    // Wait for user to manually enter credentials and login
-    console.log("\n" + "═".repeat(60));
-    console.log("👤 MANUAL LOGIN REQUIRED");
-    console.log("═".repeat(60));
-    console.log("Please enter your AADE credentials in the browser and click Login.");
-    console.log("The agent will continue automatically once you're logged in...");
-    console.log("═".repeat(60) + "\n");
-    
-    // Wait for the user to complete login (check for URL change away from login page)
-    // Poll every 2 seconds for up to 5 minutes
-    const maxWaitTime = 5 * 60 * 1000; // 5 minutes
-    const pollInterval = 2000;
-    let elapsed = 0;
-    
-    while (elapsed < maxWaitTime) {
-      await sleep(pollInterval);
-      elapsed += pollInterval;
-      
-      const currentUrl = page.url();
-      // Check if we're no longer on the login page
-      if (!currentUrl.includes('login.gsis.gr') && !currentUrl.includes('oauth2')) {
-        console.log("✅ Login detected! Continuing...");
-        break;
+    if (currentState === 'LOGIN') {
+      const loginResult = await handleCurrentState(stagehand, page, currentState);
+      if (!loginResult.success) {
+        throw new Error(loginResult.error || 'Login failed');
       }
-      
-      // Show a dot every 10 seconds to indicate we're waiting
-      if (elapsed % 10000 === 0) {
-        process.stdout.write(".");
-      }
+      currentState = loginResult.nextState || await detectPageState(page);
     }
     
-    if (elapsed >= maxWaitTime) {
-      throw new Error("Login timeout - user did not complete login within 5 minutes");
-    }
-
-    console.log(`⏳ Waiting for page to fully load...`);
-    // Use domcontentloaded instead of networkidle (more reliable for gov sites)
-    await page.waitForLoadState('domcontentloaded');
-    await sleep(3000); // Give the page time to fully load after login
-    
-    // Handle User Info page if AADE redirects there after login
-    const wasOnUserInfoPage = await handleUserInfoPageIfPresent(stagehand, page);
-    
-    // If we just saved contact info, wait for redirect and reload state
-    if (wasOnUserInfoPage) {
+    if (currentState === 'USER_INFO') {
+      const userInfoResult = await handleCurrentState(stagehand, page, currentState);
+      if (!userInfoResult.success) {
+        console.warn("⚠️  Could not complete user info, continuing anyway...");
+      }
       await page.waitForLoadState('domcontentloaded');
       await sleep(2000);
     }
     
-    // Verify we're logged in and on the main page (not login page)
-    const currentUrl = page.url();
-    if (currentUrl.includes('login.gsis.gr') || currentUrl.includes('osso_logout')) {
-      throw new Error("Login failed or session expired. Please check credentials.");
+    if (await hasSessionExpired(page)) {
+      throw new Error("Session expired or login failed");
     }
     
     console.log("✅ Successfully logged in to AADE portal");
     
-    // Process each booking
+    let successCount = 0;
+    let errorCount = 0;
+    
     for (const booking of bookings) {
-      const cancelledTag = booking.is_cancelled ? ' (CANCELLED)' : '';
-      console.log(`\n📝 Processing: ${booking.platform_id} - ${booking.guest_name}${cancelledTag}`);
+      const result = await processBooking(stagehand, page, booking);
       
-      try {
-        // First, ensure we're on the main AADE page (navigate there if needed)
-        if (!page.url().includes('short_term_letting')) {
-          console.log("🔄 Navigating back to AADE main page...");
-          await page.goto("https://www1.gsis.gr/taxisnet/short_term_letting/");
-          await page.waitForLoadState('domcontentloaded');
-          await sleep(2000);
+      updateStatus.run({
+        status: result.status,
+        screenshot: result.screenshot,
+        id: booking.id,
+      });
+      
+      if (result.status === 'SUBMITTED' || result.status === 'DRY_RUN_VERIFIED') {
+        successCount++;
+      } else {
+        errorCount++;
+        
+        if (result.status === 'NEEDS_PROPERTY') {
+          console.log("\n" + "═".repeat(60));
+          console.log("⚠️  NO PROPERTIES REGISTERED IN AADE");
+          console.log("═".repeat(60));
+          console.log("You need to register a property first before making declarations.");
+          console.log("After registering in AADE, run this agent again.");
+          console.log("═".repeat(60) + "\n");
+          
+          for (const remaining of bookings.slice(bookings.indexOf(booking) + 1)) {
+            updateStatus.run({
+              status: 'NEEDS_PROPERTY',
+              screenshot: null,
+              id: remaining.id,
+            });
+          }
+          break;
         }
-        
-        // Try to find and click the declarations link using Playwright first
-        console.log("📋 Looking for Short Term Lease Declarations link...");
-        
-        // Look for the link by text content (more reliable than LLM on this site)
-        const declarationsLink = page.locator('a:has-text("Δηλώσεις"), a:has-text("Declarations")').first();
-        const linkExists = await declarationsLink.isVisible().catch(() => false);
-        
-        if (linkExists) {
-          await declarationsLink.click();
-          await sleep(1500);
-        } else {
-          // Fallback to Stagehand if Playwright can't find it
-          await stagehand.act("Click on 'Δηλώσεις Βραχυχρόνιας Μίσθωσης' or 'Short Term Lease Declarations' link in the menu");
-          await sleep(SLOW_MO_MS);
-        }
-        
-        // Click New Declaration button
-        console.log("➕ Looking for New Declaration button...");
-        const newDeclButton = page.locator('button:has-text("Νέα Δήλωση"), button:has-text("New Declaration"), a:has-text("Νέα Δήλωση")').first();
-        const buttonExists = await newDeclButton.isVisible().catch(() => false);
-        
-        if (buttonExists) {
-          await newDeclButton.click();
-          await sleep(1500);
-        } else {
-          await stagehand.act("Click 'Νέα Δήλωση' or 'New Declaration' button");
-          await sleep(SLOW_MO_MS);
-        }
-        
-        // Fill booking dates
-        await stagehand.act(`Fill 'Arrival Date' with ${booking.check_in}`);
-        await sleep(SLOW_MO_MS);
-        await stagehand.act(`Fill 'Departure Date' with ${booking.check_out}`);
-        await sleep(SLOW_MO_MS);
-        
-        // Fill payment details (different fields for cancelled vs active)
-        if (booking.is_cancelled) {
-          await stagehand.act(`Fill 'Total amount received under cancellation policy' with ${booking.total_payout}`);
-          await stagehand.act(`Fill 'Cancelation Date' with ${booking.cancellation_date}`);
-        } else {
-          await stagehand.act(`Fill 'Total agreed rent' with ${booking.total_payout}`);
-        }
-        
-        // Select payment method
-        await stagehand.act("Select 'Electronic Platform' from Payment Method");
-        await stagehand.act("Select 'Airbnb' from the Electronic Platform list");
-
-        // Capture audit screenshot before submission
-        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-        const screenshotPath = `audit_logs/evidence_${booking.platform_id}_${timestamp}.png`;
-        await page.screenshot({ path: screenshotPath });
-        console.log(`📸 Screenshot saved: ${screenshotPath}`);
-        
-        // Submit or dry-run
-        if (DRY_RUN) {
-           console.log("🔍 DRY RUN: Skipping submission, marking as verified");
-           updateStatus.run({ 
-             status: 'DRY_RUN_VERIFIED', 
-             screenshot: screenshotPath,
-             id: booking.id 
-           });
-           await stagehand.act("Click the 'Back' or 'Επιστροφή' button to cancel and return to the list");
-           console.log("✅ Dry run complete");
-        } else {
-           console.log("🚀 PRODUCTION: Submitting to AADE...");
-           await stagehand.act("Click the final Submit/Finalize button");
-           await page.waitForLoadState('networkidle');
-           
-           updateStatus.run({ 
-             status: 'DONE', 
-             screenshot: screenshotPath,
-             id: booking.id 
-           });
-           
-           await stagehand.act("Click the button to return to the declarations list");
-           console.log("✅ Submitted successfully");
-        }
-
-      } catch (bookingError: unknown) {
-        const errorMsg = bookingError instanceof Error ? bookingError.message : String(bookingError);
-        console.error(`❌ Error: ${errorMsg}`);
-        
-        // Differentiate between maintenance and permanent errors
-        const isMaintenanceError = errorMsg.toLowerCase().includes('maintenance') ||
-                                   errorMsg.toLowerCase().includes('συντήρηση') ||
-                                   errorMsg.toLowerCase().includes('unavailable');
-        
-        const status = isMaintenanceError ? 'RETRY_LATER' : 'ERROR';
-        if (isMaintenanceError) {
-          console.log(`⚠️  System maintenance - will retry later`);
-        }
-        
-        updateStatus.run({ status, screenshot: null, id: booking.id });
-        
-        // Reset to main page for next booking
-        await page.goto("https://www1.gsis.gr/taxisnet/short_term_letting/"); 
       }
     }
-
-    console.log(`\n✅ All bookings processed`);
-
-  } catch (error: unknown) {
+    
+    console.log(`\n${"═".repeat(60)}`);
+    console.log("📊 PROCESSING SUMMARY");
+    console.log("═".repeat(60));
+    console.log(`   ✅ Successful: ${successCount}`);
+    console.log(`   ❌ Errors: ${errorCount}`);
+    console.log(`   📁 Audit logs: ${agentConfig.auditLogsDir}/`);
+    console.log("═".repeat(60) + "\n");
+    
+  } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
-    console.error("\n❌ Critical error (login/navigation):", errorMsg);
+    console.error("\n❌ Critical error:", errorMsg);
   } finally {
-    console.log("\n🔒 Closing browser...");
+    console.log("🔒 Closing browser...");
     await stagehand.close();
   }
 }
