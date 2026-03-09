@@ -6,8 +6,11 @@
   "scripts": {
     "seed": "tsx src/ingest_mocks.ts",
     "ingest": "tsx src/ingest_airbnb.ts",
+    "ingest:mock": "tsx src/ingest_mock_airbnb.ts",
     "agent": "tsx src/agent_aade.ts",
+    "admin": "tsx src/admin/server.ts",
     "clean": "rm -f bookings.db && rm -rf audit_logs/",
+    "reset": "npm run clean && npm run seed",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],

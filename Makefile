@@ -7,7 +7,7 @@
 
 .PHONY: setup install-browser mock-airbnb-setup mock-airbnb-dev \
         run-extract-mock run-ingest run-agent run-full-flow \
-        seed clean db-status help
+        seed clean db-status help admin
 
 # ============================================================================
 # SETUP TARGETS
@@ -39,6 +39,11 @@ mock-airbnb-setup:
 mock-airbnb-dev:
 	@echo "🚀 Starting mock Airbnb dashboard at http://localhost:3000"
 	cd mock-airbnb && npm run dev
+
+## Start admin dashboard (localhost:3001)
+admin:
+	@echo "🏛️ Starting Admin Dashboard at http://localhost:3001"
+	npx tsx src/admin/server.ts
 
 # ============================================================================
 # EXTRACTION TARGETS
@@ -119,6 +124,7 @@ help:
 	@echo "║                                                                ║"
 	@echo "║  DEVELOPMENT                                                   ║"
 	@echo "║    make mock-airbnb-dev  Start mock Airbnb (localhost:3000)    ║"
+	@echo "║    make admin            Start Admin Dashboard (localhost:3001)║"
 	@echo "║                                                                ║"
 	@echo "║  EXTRACTION                                                    ║"
 	@echo "║    make run-extract-mock Extract from mock Airbnb              ║"
